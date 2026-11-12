@@ -13,7 +13,7 @@ print_ast :: proc(node: Node) {
 }
 
 print_node :: proc(node: Node, buf: ^strings.Builder, indent: int) {
-	switch type in node {
+	switch type in node.contents {
 	case ^Integer_Literal:
 		print_integer_literal(type, buf, indent)
 	case ^Float_Literal:

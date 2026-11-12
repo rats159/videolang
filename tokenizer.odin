@@ -8,6 +8,7 @@ Tokenizer :: struct {
 	offset:          int,
 	errors:          [dynamic; 32]Error,
 	error_allocator: runtime.Allocator,
+	current_pos:     Source_Pos,
 }
 
 Token_Type :: enum {
@@ -50,59 +51,29 @@ Token_Type :: enum {
 }
 
 keywords := #partial [Token_Type]string {
-	.Fun  = "fun",
-	.Var  = "var",
-	.For  = "for",
-	.In   = "in",
-	.If   = "if",
-	.Else = "else",
-	.While = "while",
-	.Break = "break",
+	.Fun      = "fun",
+	.Var      = "var",
+	.For      = "for",
+	.In       = "in",
+	.If       = "if",
+	.Else     = "else",
+	.While    = "while",
+	.Break    = "break",
 	.Continue = "continue",
-	.Return = "return",
+	.Return   = "return",
 }
 
-Token :: struct {
+Token :: struct #all_or_none {
 	type:  Token_Type,
 	value: string,
-}
-
-Error :: struct {
-	message: string,
-}
-
-tokenize_entire_file :: proc(
-	source: string,
-	error_allocator: runtime.Allocator,
-) -> (
-	[]Token,
-	[dynamic; 32]Error,
-) {
-	tk := Tokenizer {
-		source          = source,
-		error_allocator = error_allocator,
-	}
-
-	tokens: [dynamic]Token
-
-	for {
-		token := scan_next_token(&tk)
-
-		append(&tokens, token)
-
-		if token.type == .EOF {
-			break
-		}
-	}
-
-	return tokens[:], tk.errors
+	pos:   Source_Pos,
 }
 
 scan_next_token :: proc(tk: ^Tokenizer) -> Token {
 	skip_whitespace(tk)
 
 	if tk_done(tk) {
-		return Token{type = .EOF, value = "<EOF>"}
+		return Token{type = .EOF, value = "<EOF>", pos = tk.current_pos}
 	}
 
 	switch tk_current(tk) {
@@ -150,14 +121,18 @@ scan_next_token :: proc(tk: ^Tokenizer) -> Token {
 		tk_error(tk, "Invalid character '%c'", tk_current(tk))
 		defer tk_advance(tk)
 
-		return Token{type = .Invalid, value = tk.source[tk.offset:tk.offset + 1]}
+		return Token {
+			type = .Invalid,
+			value = tk.source[tk.offset:tk.offset + 1],
+			pos = tk.current_pos,
+		}
 	}
 }
 
 skip_escape :: proc(tk: ^Tokenizer) {
 	switch tk_current(tk) {
 	case 'r', 'n', 'v', 't', 'a', 'b', '0', '"', '\\':
-		tk.offset += 1
+		tk_advance(tk)
 	// FUTURE: unicode escapes/hex escapex
 	case:
 		tk_error(tk, "Invalid escape sequence '\\%c'", tk_current(tk))
@@ -166,11 +141,12 @@ skip_escape :: proc(tk: ^Tokenizer) {
 
 scan_string_token :: proc(tk: ^Tokenizer) -> Token {
 	start := tk.offset
-	tk.offset += 1
+	start_pos := tk.current_pos
+	tk_advance(tk)
 
 	scan_loop: for {
 		r := tk_current(tk)
-		tk.offset += 1
+		tk_advance(tk)
 
 		if tk_done(tk) {
 			tk_error(tk, "String literal not terminated")
@@ -189,11 +165,12 @@ scan_string_token :: proc(tk: ^Tokenizer) -> Token {
 	}
 
 
-	return Token{type = .String, value = tk.source[start:tk.offset]}
+	return Token{type = .String, value = tk.source[start:tk.offset], pos = start_pos}
 }
 
 scan_number_token :: proc(tk: ^Tokenizer) -> Token {
 	start := tk.offset
+	start_pos := tk.current_pos
 	is_float := false
 
 	integer_scan: for {
@@ -207,7 +184,7 @@ scan_number_token :: proc(tk: ^Tokenizer) -> Token {
 
 	if tk_current(tk) == '.' {
 		is_float = true
-		tk.offset += 1
+		tk_advance(tk)
 		decimal_scan: for {
 			switch tk_current(tk) {
 			case '0' ..= '9', '_':
@@ -219,12 +196,12 @@ scan_number_token :: proc(tk: ^Tokenizer) -> Token {
 	}
 
 	if tk_current(tk) == 'e' {
-		tk.offset += 1
+		tk_advance(tk)
 		is_float = true
 
 		switch tk_current(tk) {
 		case '+', '-':
-			tk.offset += 1
+			tk_advance(tk)
 		}
 		exponent_digits := 0
 		exponent_scan: for {
@@ -242,11 +219,16 @@ scan_number_token :: proc(tk: ^Tokenizer) -> Token {
 		}
 	}
 
-	return Token{value = tk.source[start:tk.offset], type = is_float ? .Float : .Integer}
+	return Token {
+		value = tk.source[start:tk.offset],
+		type = is_float ? .Float : .Integer,
+		pos = start_pos,
+	}
 }
 
 scan_word_token :: proc(tk: ^Tokenizer) -> Token {
 	start := tk.offset
+	start_pos := tk.current_pos
 
 	word_loop: for {
 		switch tk_current(tk) {
@@ -268,7 +250,7 @@ scan_word_token :: proc(tk: ^Tokenizer) -> Token {
 		}
 	}
 
-	return Token{type = type, value = word}
+	return Token{type = type, value = word, pos = start_pos}
 }
 
 skip_whitespace :: proc(tk: ^Tokenizer) {
@@ -279,10 +261,10 @@ skip_whitespace :: proc(tk: ^Tokenizer) {
 		case '/':
 			switch tk_peek(tk) {
 			case '/':
-				tk.offset += 2
+				tk_advance(tk, 2)
 				skip_line_comment(tk)
 			case '*':
-				tk.offset += 2
+				tk_advance(tk, 2)
 				skip_block_comment(tk)
 			case:
 				return
@@ -310,13 +292,13 @@ skip_block_comment :: proc(tk: ^Tokenizer) {
 	for depth != 0 {
 		if tk_current(tk) == '/' && tk_peek(tk) == '*' {
 			depth += 1
-			tk.offset += 2
+			tk_advance(tk, 2)
 			continue
 		}
 
 		if tk_current(tk) == '*' && tk_peek(tk) == '/' {
 			depth -= 1
-			tk.offset += 2
+			tk_advance(tk, 2)
 			continue
 		}
 
@@ -332,9 +314,10 @@ scan_simple_token :: proc(tk: ^Tokenizer, type: Token_Type, byte_length: int) ->
 	token := Token {
 		value = tk.source[tk.offset:tk.offset + byte_length],
 		type  = type,
+		pos   = tk.current_pos,
 	}
 
-	tk.offset += byte_length
+	tk_advance(tk, byte_length)
 
 	return token
 }
@@ -353,14 +336,24 @@ tk_peek :: proc(tk: ^Tokenizer) -> rune {
 	return utf8.rune_at_pos(tk.source[tk.offset:], 1)
 }
 
-tk_advance :: proc(tk: ^Tokenizer) {
-	_, size := utf8.decode_rune(tk.source[tk.offset:])
+tk_advance :: proc(tk: ^Tokenizer, codepoints: int = 1) {
+	total_distance := 0
+	for _ in 0 ..< codepoints {
+		char, size := utf8.decode_rune(tk.source[tk.offset + total_distance:])
+		total_distance += size
 
-	tk.offset += size
+		if char == '\n' {
+			tk.current_pos.line += 1
+			tk.current_pos.col = 0
+		}
+		tk.current_pos.col += 1
+	}
+
+	tk.offset += total_distance
 }
 
 tk_error :: proc(tk: ^Tokenizer, message: string, args: ..any) {
 	message := fmt.aprintf(message, ..args, allocator = tk.error_allocator)
 
-	append(&tk.errors, Error{message})
+	append(&tk.errors, Error{message = message, type = .Syntax, pos = tk.current_pos})
 }

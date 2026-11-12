@@ -1,6 +1,11 @@
 package videolang
 
-Node :: union {
+Node :: struct {
+	contents: Node_Contents,
+	position: Source_Pos,
+}
+
+Node_Contents :: union {
 	^Integer_Literal,
 	^Float_Literal,
 	^String_Literal,
